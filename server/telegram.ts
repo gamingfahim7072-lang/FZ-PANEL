@@ -1,4 +1,4 @@
-import { db, TelegramBot, Customer, Order, Product, ProductPackage, LicenseKey, DigitalFile, Broadcast, BotMenu, BotButton, BotPaymentConfig } from './db.js';
+import { db, TelegramBot, Customer, Order, Product, ProductPackage, LicenseKey, DigitalFile, Broadcast, BotMenu, BotButton, BotPaymentConfig, BotCommand } from './db.js';
 import { CryptoService } from './crypto.js';
 import { logAudit } from './auth.js';
 
@@ -345,6 +345,163 @@ export class TelegramService {
         .replace(/{store_name}/g, settings.display_name || bot.first_name)
         .replace(/{balance}/g, `${settings.currency || '₹'} ${customer!.wallet_balance}`);
     };
+
+    // 1.5 Dynamic Command Builder Dispatch
+    if (incomingText && incomingText.startsWith('/')) {
+      const cmdParts = incomingText.split(/\s+/)[0].toLowerCase();
+      const baseCmd = cmdParts.split('@')[0]; // Remove @botusername
+      const matchedCmd = (db.bot_commands || []).find(
+        c => c.bot_id === bot.id && c.is_enabled && c.command.toLowerCase() === baseCmd
+      );
+
+      if (matchedCmd) {
+        // OPEN_MENU or OPEN_SUBMENU
+        if (matchedCmd.action_type === 'OPEN_MENU' || matchedCmd.action_type === 'OPEN_SUBMENU') {
+          const menuId = matchedCmd.target_id || 'main';
+          const menu = db.bot_menus.find(m => m.bot_id === bot.id && (m.id === menuId || m.slug === menuId));
+          const keyboard = this.buildBotKeyboard(bot.id, menu?.id || 'main');
+          let text = matchedCmd.custom_response_message
+            ? interpolate(matchedCmd.custom_response_message)
+            : menu && menu.id !== 'main' && menu.slug !== 'main'
+              ? `📂 *${menu.title}*\n\n${interpolate(menu.message_text || 'Select an option below:')}`
+              : `✨ *${settings.display_name || bot.first_name}*\n\n${interpolate(settings.start_text || 'Welcome to our digital store! Select an option below:')}`;
+          
+          if (!isSimulator && rawToken && !rawToken.includes('Sample')) {
+            await this.sendMessage(rawToken, chatId, text, keyboard);
+          }
+          return { responseText: text, keyboard };
+        }
+
+        // SHOW_PRODUCTS
+        if (matchedCmd.action_type === 'SHOW_PRODUCTS') {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: 'action:PRODUCTS_LIST:ALL' }
+            },
+            isSimulator
+          );
+        }
+
+        // OPEN_CATEGORY
+        if (matchedCmd.action_type === 'OPEN_CATEGORY' && matchedCmd.target_id) {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: `action:CATEGORY:${matchedCmd.target_id}` }
+            },
+            isSimulator
+          );
+        }
+
+        // OPEN_PRODUCT
+        if (matchedCmd.action_type === 'OPEN_PRODUCT' && matchedCmd.target_id) {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: `action:BUY_PROD:${matchedCmd.target_id}` }
+            },
+            isSimulator
+          );
+        }
+
+        // SELECT_PACKAGE
+        if (matchedCmd.action_type === 'SELECT_PACKAGE' && (matchedCmd.target_package_id || matchedCmd.target_id)) {
+          const targetPkgId = matchedCmd.target_package_id || matchedCmd.target_id;
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: `action:BUY_PKG:${targetPkgId}` }
+            },
+            isSimulator
+          );
+        }
+
+        // PAYMENT_METHODS or SHOW_QR
+        if (matchedCmd.action_type === 'PAYMENT_METHODS' || matchedCmd.action_type === 'SHOW_QR') {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: 'action:PAYMENT_INFO:MAIN' }
+            },
+            isSimulator
+          );
+        }
+
+        // MY_ORDERS
+        if (matchedCmd.action_type === 'MY_ORDERS') {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: 'action:MY_ORDERS:VIEW' }
+            },
+            isSimulator
+          );
+        }
+
+        // MY_ACCOUNT
+        if (matchedCmd.action_type === 'MY_ACCOUNT') {
+          let text = `👤 *Customer Account & Profile*\n\n`;
+          text += `• *Name:* ${customer.first_name} ${customer.last_name || ''}\n`;
+          text += `• *Username:* ${customer.username ? `@${customer.username}` : 'Not set'}\n`;
+          text += `• *Customer ID:* \`${customer.id}\`\n`;
+          text += `• *Wallet Balance:* ${settings.currency || '₹'} ${customer.wallet_balance}\n`;
+          text += `• *Total Purchases:* ${customer.total_purchases} orders\n`;
+          text += `• *Total Spent:* ${settings.currency || '₹'} ${customer.total_spent}\n`;
+
+          const keyboard = [
+            [{ text: '💳 Top-up & Payment Methods', callback_data: 'action:PAYMENT_INFO:MAIN' }],
+            [{ text: '🧾 Order History', callback_data: 'action:MY_ORDERS:VIEW' }],
+            [{ text: '🔙 Home', callback_data: 'action:HOME:HOME' }]
+          ];
+
+          if (!isSimulator && rawToken && !rawToken.includes('Sample')) {
+            await this.sendMessage(rawToken, chatId, text, keyboard);
+          }
+          return { responseText: text, keyboard };
+        }
+
+        // SUPPORT
+        if (matchedCmd.action_type === 'SUPPORT') {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: 'action:SUPPORT:HELP' }
+            },
+            isSimulator
+          );
+        }
+
+        // FAQ
+        if (matchedCmd.action_type === 'FAQ') {
+          return this.processUpdate(
+            bot,
+            {
+              update_id: Date.now(),
+              callback_query: { id: callbackQueryId || '1', from: tgUser, data: 'action:FAQS:FAQS' }
+            },
+            isSimulator
+          );
+        }
+
+        // CUSTOM_MESSAGE or generic custom response
+        if (matchedCmd.action_type === 'CUSTOM_MESSAGE' || matchedCmd.custom_response_message) {
+          const text = interpolate(matchedCmd.custom_response_message || 'Command executed.');
+          const keyboard = this.buildBotKeyboard(bot.id, 'main');
+          if (!isSimulator && rawToken && !rawToken.includes('Sample')) {
+            await this.sendMessage(rawToken, chatId, text, keyboard);
+          }
+          return { responseText: text, keyboard };
+        }
+      }
+    }
 
     // 2. Handle /start or Start Menu
     if (
@@ -837,15 +994,28 @@ export class TelegramService {
     let descriptionSet = false;
 
     try {
-      // 1. Set bot commands
+      // 1. Set bot commands from Database (Command Builder)
+      let activeCommands = (db.bot_commands || [])
+        .filter(c => c.bot_id === bot.id && c.is_enabled)
+        .sort((a, b) => a.sort_order - b.sort_order);
+
+      if (activeCommands.length === 0) {
+        activeCommands = [
+          { command: 'start', description: 'Main Menu & Catalog' } as any,
+          { command: 'products', description: 'Browse Products' } as any,
+          { command: 'orders', description: 'My Purchases & Licenses' } as any,
+          { command: 'faq', description: 'Frequently Asked Questions' } as any,
+          { command: 'support', description: 'Customer Support' } as any
+        ];
+      }
+
+      const formattedCommands = activeCommands.map(c => ({
+        command: c.command.replace(/^\//, '').toLowerCase().slice(0, 32),
+        description: (c.description || 'Command action').slice(0, 256)
+      }));
+
       const commandsRes = await this.callApi(rawToken, 'setMyCommands', {
-        commands: [
-          { command: 'start', description: 'Main Menu & Catalog' },
-          { command: 'products', description: 'Browse Products' },
-          { command: 'orders', description: 'My Purchases & Licenses' },
-          { command: 'faq', description: 'Frequently Asked Questions' },
-          { command: 'support', description: 'Customer Support' }
-        ]
+        commands: formattedCommands
       });
       commandsSet = !!commandsRes.ok;
 

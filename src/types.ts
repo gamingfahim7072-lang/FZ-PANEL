@@ -123,6 +123,53 @@ export interface BotFaq {
   created_at?: string;
 }
 
+export type CommandTriggerType =
+  | 'TELEGRAM_COMMAND'
+  | 'BUTTON_CLICK'
+  | 'CALLBACK_QUERY'
+  | 'DEEP_LINK'
+  | 'AUTO_EVENT';
+
+export type CommandActionType =
+  | 'OPEN_MENU'
+  | 'OPEN_SUBMENU'
+  | 'OPEN_CATEGORY'
+  | 'SHOW_PRODUCTS'
+  | 'OPEN_PRODUCT'
+  | 'SELECT_PACKAGE'
+  | 'START_WORKFLOW'
+  | 'SEND_MESSAGE'
+  | 'CHECKOUT'
+  | 'PAYMENT_METHODS'
+  | 'SHOW_QR'
+  | 'MY_ORDERS'
+  | 'MY_ACCOUNT'
+  | 'SUPPORT'
+  | 'FAQ'
+  | 'REFERRAL'
+  | 'RESELLER'
+  | 'CUSTOM_ACTION'
+  | 'CUSTOM_MESSAGE';
+
+export interface BotCommand {
+  id: string;
+  bot_id: string;
+  owner_id?: string;
+  command: string; // e.g. "/products" or "/start"
+  description: string;
+  trigger_type: CommandTriggerType;
+  action_type: CommandActionType;
+  target_id?: string;
+  target_package_id?: string;
+  target_name?: string;
+  next_step?: string;
+  custom_response_message?: string;
+  sort_order: number;
+  is_enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface BotVersion {
   id: string;
   bot_id: string;
@@ -133,6 +180,7 @@ export interface BotVersion {
   menus?: BotMenu[];
   buttons: BotButton[];
   faqs?: BotFaq[];
+  commands?: BotCommand[];
   created_at: string;
 }
 

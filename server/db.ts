@@ -201,6 +201,44 @@ export interface BotFaq {
   created_at: string;
 }
 
+export interface BotCommand {
+  id: string;
+  bot_id: string;
+  owner_id: string;
+  command: string; // e.g. "/products" or "/start"
+  description: string;
+  trigger_type: 'TELEGRAM_COMMAND' | 'BUTTON_CLICK' | 'CALLBACK_QUERY' | 'DEEP_LINK' | 'AUTO_EVENT';
+  action_type:
+    | 'OPEN_MENU'
+    | 'OPEN_SUBMENU'
+    | 'OPEN_CATEGORY'
+    | 'SHOW_PRODUCTS'
+    | 'OPEN_PRODUCT'
+    | 'SELECT_PACKAGE'
+    | 'START_WORKFLOW'
+    | 'SEND_MESSAGE'
+    | 'CHECKOUT'
+    | 'PAYMENT_METHODS'
+    | 'SHOW_QR'
+    | 'MY_ORDERS'
+    | 'MY_ACCOUNT'
+    | 'SUPPORT'
+    | 'FAQ'
+    | 'REFERRAL'
+    | 'RESELLER'
+    | 'CUSTOM_ACTION'
+    | 'CUSTOM_MESSAGE';
+  target_id?: string;
+  target_package_id?: string;
+  target_name?: string;
+  next_step?: string;
+  custom_response_message?: string;
+  sort_order: number;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BotVersion {
   id: string;
   bot_id: string;
@@ -211,6 +249,7 @@ export interface BotVersion {
   menus?: BotMenu[];
   buttons: BotButton[];
   faqs?: BotFaq[];
+  commands?: BotCommand[];
   created_at: string;
 }
 
@@ -491,6 +530,7 @@ export interface DatabaseSchema {
   bot_menus: BotMenu[];
   bot_buttons: BotButton[];
   bot_faqs: BotFaq[];
+  bot_commands: BotCommand[];
   bot_versions: BotVersion[];
   bot_payment_configs: BotPaymentConfig[];
   media_items: MediaItem[];
@@ -637,6 +677,7 @@ export class Database {
       bot_menus: [],
       bot_buttons: [],
       bot_faqs: [],
+      bot_commands: [],
       bot_versions: [],
       bot_payment_configs: [],
       media_items: [],
@@ -715,6 +756,8 @@ export class Database {
   public set bot_buttons(val: BotButton[]) { this.data.bot_buttons = val; }
   public get bot_faqs(): BotFaq[] { return this.data.bot_faqs; }
   public set bot_faqs(val: BotFaq[]) { this.data.bot_faqs = val; }
+  public get bot_commands(): BotCommand[] { return this.data.bot_commands; }
+  public set bot_commands(val: BotCommand[]) { this.data.bot_commands = val; }
   public get bot_versions(): BotVersion[] { return this.data.bot_versions; }
   public set bot_versions(val: BotVersion[]) { this.data.bot_versions = val; }
   public get bot_payment_configs(): BotPaymentConfig[] { return this.data.bot_payment_configs; }

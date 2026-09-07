@@ -19,6 +19,7 @@ import {
   BotButton,
   ResellerApplication,
   BotFaq,
+  BotCommand,
   BotVersion,
   BotPaymentConfig,
   MediaItem,
@@ -699,9 +700,10 @@ apiRouter.get('/bots/:id/settings', authenticate, async (req: AuthenticatedReque
     .filter(b => b.bot_id === id)
     .sort((a, b) => a.row_order - b.row_order || a.col_order - b.col_order);
   const faqs = db.bot_faqs.filter(f => f.bot_id === id).sort((a, b) => a.order - b.order);
+  const commands = (db.bot_commands || []).filter(c => c.bot_id === id).sort((a, b) => a.sort_order - b.sort_order);
   const paymentConfig = db.bot_payment_configs.find(p => p.bot_id === id);
 
-  return res.json({ success: true, settings: settings || null, buttons, faqs, paymentConfig: paymentConfig || null });
+  return res.json({ success: true, settings: settings || null, buttons, faqs, commands, paymentConfig: paymentConfig || null });
 });
 
 apiRouter.put('/bots/:id/settings', authenticate, async (req: AuthenticatedRequest, res: Response) => {
@@ -1015,12 +1017,483 @@ apiRouter.post('/bots/:id/buttons', authenticate, async (req: AuthenticatedReque
   }
 });
 
+// Helper: Telegram Command Normalizer & Validator
+function validateAndNormalizeTelegramCommand(
+  input: string,
+  botId: string,
+  currentCommandId?: string
+): { valid: boolean; normalized?: string; error?: string } {
+  if (!input || typeof input !== 'string') {
+    return { valid: false, error: 'Command name is required.' };
+  }
+  let cmd = input.trim().toLowerCase();
+  if (!cmd.startsWith('/')) {
+    cmd = '/' + cmd;
+  }
+
+  const pattern = /^\/[a-z0-9_]{1,32}$/;
+  if (!pattern.test(cmd)) {
+    return {
+      valid: false,
+      error: 'Command must begin with / followed by 1 to 32 characters (only lowercase letters, numbers, and underscores).'
+    };
+  }
+
+  const existing = (db.bot_commands || []).find(
+    c => c.bot_id === botId && c.command.toLowerCase() === cmd && c.id !== currentCommandId
+  );
+  if (existing) {
+    return { valid: false, error: `Command '${cmd}' is already assigned on this bot.` };
+  }
+
+  return { valid: true, normalized: cmd };
+}
+
+function getDefaultBotCommands(botId: string, ownerId: string): BotCommand[] {
+  const now = new Date().toISOString();
+  return [
+    {
+      id: `cmd-${botId}-start`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/start',
+      description: 'Open the main store menu and welcome screen',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'OPEN_MENU',
+      target_id: 'main',
+      target_name: 'Main Menu',
+      next_step: 'SHOW_CATEGORIES',
+      sort_order: 0,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-products`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/products',
+      description: 'Browse available digital products and licenses',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'SHOW_PRODUCTS',
+      target_id: 'all',
+      target_name: 'Product Catalog',
+      next_step: 'SELECT_PACKAGE',
+      sort_order: 1,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-orders`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/orders',
+      description: 'View order history, license keys, and downloads',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'MY_ORDERS',
+      target_id: 'orders',
+      target_name: 'Order History',
+      next_step: 'MY_ORDERS',
+      sort_order: 2,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-balance`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/balance',
+      description: 'Check wallet balance, customer ID, and top up',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'MY_ACCOUNT',
+      target_id: 'account',
+      target_name: 'Customer Account & Balance',
+      next_step: 'PAYMENT_METHODS',
+      sort_order: 3,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-payment`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/payment',
+      description: 'View merchant UPI QR code and payment instructions',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'PAYMENT_METHODS',
+      target_id: 'payment',
+      target_name: 'Payment Methods & QR',
+      next_step: 'SHOW_QR',
+      sort_order: 4,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-support`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/support',
+      description: 'Contact customer support and support desk',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'SUPPORT',
+      target_id: 'support',
+      target_name: 'Customer Support Desk',
+      next_step: 'SUPPORT',
+      sort_order: 5,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    },
+    {
+      id: `cmd-${botId}-faq`,
+      bot_id: botId,
+      owner_id: ownerId,
+      command: '/faq',
+      description: 'Frequently asked questions and guides',
+      trigger_type: 'TELEGRAM_COMMAND',
+      action_type: 'FAQ',
+      target_id: 'faq',
+      target_name: 'Frequently Asked Questions',
+      next_step: 'FAQ',
+      sort_order: 6,
+      is_enabled: true,
+      created_at: now,
+      updated_at: now
+    }
+  ];
+}
+
+// Bot Commands CRUD (Command Builder)
+apiRouter.get('/bots/:id/commands', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    if (!Array.isArray(db.bot_commands)) {
+      db.bot_commands = [];
+    }
+
+    let commands = db.bot_commands.filter(c => c.bot_id === id);
+    if (commands.length === 0) {
+      // Seed default commands
+      const defaultCmds = getDefaultBotCommands(id, user.id);
+      db.bot_commands.push(...defaultCmds);
+      db.saveImmediately();
+      commands = defaultCmds;
+    }
+
+    commands.sort((a, b) => a.sort_order - b.sort_order);
+    return res.json({ success: true, commands });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/bots/:id/commands', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const {
+      command,
+      description,
+      trigger_type = 'TELEGRAM_COMMAND',
+      action_type = 'OPEN_MENU',
+      target_id,
+      target_name,
+      next_step,
+      custom_response_message,
+      is_enabled = true
+    } = req.body;
+
+    const validation = validateAndNormalizeTelegramCommand(command, id);
+    if (!validation.valid) {
+      return res.status(400).json({ success: false, error: validation.error });
+    }
+
+    const cleanDesc = String(description || '').trim();
+    if (!cleanDesc) {
+      return res.status(400).json({ success: false, error: 'Command description is required (1-256 characters).' });
+    }
+    if (cleanDesc.length > 256) {
+      return res.status(400).json({ success: false, error: 'Description exceeds Telegram API limit of 256 characters.' });
+    }
+
+    const currentCommands = (db.bot_commands || []).filter(c => c.bot_id === id);
+    const maxOrder = currentCommands.reduce((acc, curr) => Math.max(acc, curr.sort_order ?? 0), -1);
+    const nowStr = new Date().toISOString();
+
+    const newCommand: BotCommand = {
+      id: `cmd-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      bot_id: id,
+      owner_id: user.id,
+      command: validation.normalized!,
+      description: cleanDesc,
+      trigger_type: trigger_type || 'TELEGRAM_COMMAND',
+      action_type: action_type || 'OPEN_MENU',
+      target_id: target_id || undefined,
+      target_name: target_name || undefined,
+      next_step: next_step || undefined,
+      custom_response_message: custom_response_message || undefined,
+      sort_order: maxOrder + 1,
+      is_enabled: is_enabled !== false,
+      created_at: nowStr,
+      updated_at: nowStr
+    };
+
+    if (!Array.isArray(db.bot_commands)) {
+      db.bot_commands = [];
+    }
+    db.bot_commands.push(newCommand);
+    db.saveImmediately();
+
+    logAudit({
+      userId: user.id,
+      action: 'BOT_COMMAND_CREATED',
+      resourceType: 'BOT_COMMAND',
+      resourceId: newCommand.id,
+      metadata: { command: newCommand.command, action_type: newCommand.action_type },
+      req
+    });
+
+    return res.json({ success: true, command: newCommand });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.put('/bots/:id/commands/:cmdId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id, cmdId } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const cmd = (db.bot_commands || []).find(c => c.id === cmdId && c.bot_id === id);
+    if (!cmd) {
+      return res.status(404).json({ success: false, error: 'Command not found.' });
+    }
+
+    const {
+      command,
+      description,
+      trigger_type,
+      action_type,
+      target_id,
+      target_name,
+      next_step,
+      custom_response_message,
+      is_enabled,
+      sort_order
+    } = req.body;
+
+    if (command !== undefined) {
+      const validation = validateAndNormalizeTelegramCommand(command, id, cmdId);
+      if (!validation.valid) {
+        return res.status(400).json({ success: false, error: validation.error });
+      }
+      cmd.command = validation.normalized!;
+    }
+
+    if (description !== undefined) {
+      const cleanDesc = String(description).trim();
+      if (!cleanDesc) {
+        return res.status(400).json({ success: false, error: 'Command description cannot be empty.' });
+      }
+      if (cleanDesc.length > 256) {
+        return res.status(400).json({ success: false, error: 'Description exceeds Telegram API limit of 256 characters.' });
+      }
+      cmd.description = cleanDesc;
+    }
+
+    if (trigger_type !== undefined) cmd.trigger_type = trigger_type;
+    if (action_type !== undefined) cmd.action_type = action_type;
+    if (target_id !== undefined) cmd.target_id = target_id || undefined;
+    if (target_name !== undefined) cmd.target_name = target_name || undefined;
+    if (next_step !== undefined) cmd.next_step = next_step || undefined;
+    if (custom_response_message !== undefined) cmd.custom_response_message = custom_response_message || undefined;
+    if (is_enabled !== undefined) cmd.is_enabled = !!is_enabled;
+    if (typeof sort_order === 'number') cmd.sort_order = sort_order;
+    cmd.updated_at = new Date().toISOString();
+
+    db.saveImmediately();
+
+    logAudit({
+      userId: user.id,
+      action: 'BOT_COMMAND_UPDATED',
+      resourceType: 'BOT_COMMAND',
+      resourceId: cmd.id,
+      metadata: { command: cmd.command },
+      req
+    });
+
+    return res.json({ success: true, command: cmd });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.patch('/bots/:id/commands/:cmdId/toggle', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id, cmdId } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const cmd = (db.bot_commands || []).find(c => c.id === cmdId && c.bot_id === id);
+    if (!cmd) {
+      return res.status(404).json({ success: false, error: 'Command not found.' });
+    }
+
+    cmd.is_enabled = !cmd.is_enabled;
+    cmd.updated_at = new Date().toISOString();
+    db.saveImmediately();
+
+    return res.json({
+      success: true,
+      is_enabled: cmd.is_enabled,
+      message: `Command ${cmd.command} is now ${cmd.is_enabled ? 'active' : 'disabled'}.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/bots/:id/commands/reorder', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const { commandIds } = req.body;
+    if (!Array.isArray(commandIds)) {
+      return res.status(400).json({ success: false, error: 'commandIds array is required.' });
+    }
+
+    commandIds.forEach((cmdId: string, idx: number) => {
+      const cmd = (db.bot_commands || []).find(c => c.id === cmdId && c.bot_id === id);
+      if (cmd) {
+        cmd.sort_order = idx;
+        cmd.updated_at = new Date().toISOString();
+      }
+    });
+
+    db.saveImmediately();
+
+    const updated = (db.bot_commands || [])
+      .filter(c => c.bot_id === id)
+      .sort((a, b) => a.sort_order - b.sort_order);
+
+    return res.json({ success: true, commands: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/bots/:id/commands/:cmdId/duplicate', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id, cmdId } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const existing = (db.bot_commands || []).find(c => c.id === cmdId && c.bot_id === id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Command not found.' });
+    }
+
+    // Generate unique command name
+    let newName = `${existing.command}_copy`;
+    let counter = 1;
+    while (
+      (db.bot_commands || []).some(c => c.bot_id === id && c.command.toLowerCase() === newName.toLowerCase())
+    ) {
+      counter++;
+      newName = `${existing.command}_copy${counter}`;
+    }
+
+    const currentCommands = (db.bot_commands || []).filter(c => c.bot_id === id);
+    const maxOrder = currentCommands.reduce((acc, curr) => Math.max(acc, curr.sort_order ?? 0), -1);
+    const nowStr = new Date().toISOString();
+
+    const clonedCommand: BotCommand = {
+      ...JSON.parse(JSON.stringify(existing)),
+      id: `cmd-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      command: newName,
+      description: `${existing.description} (Copy)`.slice(0, 256),
+      sort_order: maxOrder + 1,
+      created_at: nowStr,
+      updated_at: nowStr
+    };
+
+    db.bot_commands.push(clonedCommand);
+    db.saveImmediately();
+
+    return res.json({ success: true, command: clonedCommand });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.delete('/bots/:id/commands/:cmdId', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id, cmdId } = req.params;
+    const user = req.user!;
+    const bot = db.telegram_bots.find(b => b.id === id);
+    if (!bot || !assertOwnership(user, bot.owner_id)) {
+      return res.status(404).json({ success: false, error: 'Bot not found.' });
+    }
+
+    const cmd = (db.bot_commands || []).find(c => c.id === cmdId && c.bot_id === id);
+    if (!cmd) {
+      return res.status(404).json({ success: false, error: 'Command not found.' });
+    }
+
+    db.bot_commands = (db.bot_commands || []).filter(c => !(c.id === cmdId && c.bot_id === id));
+    db.saveImmediately();
+
+    logAudit({
+      userId: user.id,
+      action: 'BOT_COMMAND_DELETED',
+      resourceType: 'BOT_COMMAND',
+      resourceId: cmdId,
+      metadata: { command: cmd.command },
+      req
+    });
+
+    return res.json({ success: true, message: `Command ${cmd.command} deleted successfully.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Atomic Full Save Endpoint (Settings, Menus, Buttons, FAQs, Payment Config)
 apiRouter.post('/bots/:id/full-save', authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const user = req.user!;
-    const { settings, menus, buttons, faqs, paymentConfig } = req.body;
+    const { settings, menus, buttons, faqs, commands, paymentConfig } = req.body;
 
     const bot = db.telegram_bots.find(b => b.id === id);
     if (!bot || !assertOwnership(user, bot.owner_id)) {
@@ -1159,6 +1632,35 @@ apiRouter.post('/bots/:id/full-save', authenticate, async (req: AuthenticatedReq
       }
     }
 
+    // 6. Save Telegram Commands
+    if (Array.isArray(commands)) {
+      db.bot_commands = (db.bot_commands || []).filter(c => c.bot_id !== id);
+      const newCommands: BotCommand[] = commands.map((c: any, idx: number) => {
+        let cmd = String(c.command || `cmd_${idx}`).trim().toLowerCase();
+        if (!cmd.startsWith('/')) cmd = '/' + cmd;
+        cmd = cmd.replace(/[^a-z0-9_]/g, '_').slice(0, 33);
+        if (!/^\/[a-z0-9_]{1,32}$/.test(cmd)) cmd = `/cmd_${idx}`;
+        return {
+          id: c.id || `cmd-${Date.now()}-${idx}`,
+          bot_id: id,
+          owner_id: user.id,
+          command: cmd,
+          description: String(c.description || '').trim().slice(0, 256),
+          trigger_type: c.trigger_type || 'TELEGRAM_COMMAND',
+          action_type: c.action_type || 'OPEN_MENU',
+          target_id: c.target_id || undefined,
+          target_name: c.target_name || undefined,
+          next_step: c.next_step || undefined,
+          custom_response_message: c.custom_response_message || undefined,
+          sort_order: typeof c.sort_order === 'number' ? c.sort_order : idx,
+          is_enabled: c.is_enabled !== false,
+          created_at: c.created_at || nowStr,
+          updated_at: nowStr
+        };
+      });
+      db.bot_commands.push(...newCommands);
+    }
+
     logAudit({
       userId: user.id,
       action: 'BOT_FULL_SAVE',
@@ -1171,7 +1673,7 @@ apiRouter.post('/bots/:id/full-save', authenticate, async (req: AuthenticatedReq
 
     return res.json({
       success: true,
-      message: 'All bot settings, navigation tree, submenus, buttons, FAQs, and payment gateways saved successfully!'
+      message: 'All bot settings, navigation tree, submenus, buttons, commands, FAQs, and payment gateways saved successfully!'
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1194,6 +1696,7 @@ apiRouter.post('/bots/:id/deploy', authenticate, async (req: AuthenticatedReques
     const menus = db.bot_menus.filter(m => m.bot_id === id);
     const buttons = db.bot_buttons.filter(b => b.bot_id === id);
     const faqs = db.bot_faqs.filter(f => f.bot_id === id);
+    const commands = (db.bot_commands || []).filter(c => c.bot_id === id);
 
     // Create a Version Snapshot for instant rollback
     const existingVersions = db.bot_versions.filter(v => v.bot_id === id);
@@ -1208,6 +1711,7 @@ apiRouter.post('/bots/:id/deploy', authenticate, async (req: AuthenticatedReques
       menus: JSON.parse(JSON.stringify(menus || [])),
       buttons: JSON.parse(JSON.stringify(buttons || [])),
       faqs: JSON.parse(JSON.stringify(faqs || [])),
+      commands: JSON.parse(JSON.stringify(commands || [])),
       created_at: new Date().toISOString()
     };
     db.bot_versions.unshift(newVersion);
@@ -1352,6 +1856,12 @@ apiRouter.post('/bots/:id/versions/:versionId/restore', authenticate, async (req
     if (version.faqs) {
       db.bot_faqs = db.bot_faqs.filter(f => f.bot_id !== id);
       db.bot_faqs.push(...version.faqs);
+    }
+
+    // Restore Commands
+    if (version.commands) {
+      db.bot_commands = (db.bot_commands || []).filter(c => c.bot_id !== id);
+      db.bot_commands.push(...version.commands);
     }
 
     db.saveImmediately();

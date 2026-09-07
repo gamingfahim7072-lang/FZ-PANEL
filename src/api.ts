@@ -18,6 +18,7 @@ import {
   ResellerApplication,
   DashboardStats,
   BotFaq,
+  BotCommand,
   BotVersion,
   BotPaymentConfig,
   MediaItem,
@@ -169,7 +170,14 @@ class ApiClient {
   }
 
   public async getBotSettings(botId: string) {
-    return this.request<{ success: boolean; settings: BotSettings | null; buttons: BotButton[]; faqs?: BotFaq[]; paymentConfig?: BotPaymentConfig }>(`/bots/${botId}/settings`);
+    return this.request<{
+      success: boolean;
+      settings: BotSettings | null;
+      buttons: BotButton[];
+      faqs?: BotFaq[];
+      commands?: BotCommand[];
+      paymentConfig?: BotPaymentConfig;
+    }>(`/bots/${botId}/settings`);
   }
 
   public async updateBotSettings(botId: string, settings: Partial<BotSettings>) {
@@ -218,12 +226,57 @@ class ApiClient {
     });
   }
 
+  // Telegram Command Builder
+  public async getBotCommands(botId: string) {
+    return this.request<{ success: boolean; commands: BotCommand[] }>(`/bots/${botId}/commands`);
+  }
+
+  public async createBotCommand(botId: string, command: Partial<BotCommand>) {
+    return this.request<{ success: boolean; command: BotCommand }>(`/bots/${botId}/commands`, {
+      method: 'POST',
+      body: JSON.stringify(command)
+    });
+  }
+
+  public async updateBotCommand(botId: string, cmdId: string, command: Partial<BotCommand>) {
+    return this.request<{ success: boolean; command: BotCommand }>(`/bots/${botId}/commands/${cmdId}`, {
+      method: 'PUT',
+      body: JSON.stringify(command)
+    });
+  }
+
+  public async toggleBotCommand(botId: string, cmdId: string) {
+    return this.request<{ success: boolean; is_enabled: boolean; message: string }>(`/bots/${botId}/commands/${cmdId}/toggle`, {
+      method: 'PATCH'
+    });
+  }
+
+  public async reorderBotCommands(botId: string, commandIds: string[]) {
+    return this.request<{ success: boolean; commands: BotCommand[] }>(`/bots/${botId}/commands/reorder`, {
+      method: 'POST',
+      body: JSON.stringify({ commandIds })
+    });
+  }
+
+  public async duplicateBotCommand(botId: string, cmdId: string) {
+    return this.request<{ success: boolean; command: BotCommand }>(`/bots/${botId}/commands/${cmdId}/duplicate`, {
+      method: 'POST'
+    });
+  }
+
+  public async deleteBotCommand(botId: string, cmdId: string) {
+    return this.request<{ success: boolean; message: string }>(`/bots/${botId}/commands/${cmdId}`, {
+      method: 'DELETE'
+    });
+  }
+
   // Atomic Full Save for Bot Management
   public async fullSaveBot(botId: string, payload: {
     settings?: Partial<BotSettings>;
     menus?: BotMenu[];
     buttons?: BotButton[];
     faqs?: BotFaq[];
+    commands?: BotCommand[];
     paymentConfig?: Partial<BotPaymentConfig>;
   }) {
     return this.request<{ success: boolean; message: string }>(`/bots/${botId}/full-save`, {

@@ -27,7 +27,8 @@ import {
   Home,
   Layers,
   Edit3,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Terminal
 } from 'lucide-react';
 import {
   TelegramBot,
@@ -37,11 +38,13 @@ import {
   BotFaq,
   BotVersion,
   BotPaymentConfig,
+  BotCommand,
   Product,
   ProductCategory,
   ProductPackage
 } from '../types';
 import { api } from '../api';
+import { BotCommandBuilder } from '../components/BotCommandBuilder';
 
 interface BotEditorViewProps {
   bot: TelegramBot | null;
@@ -49,7 +52,7 @@ interface BotEditorViewProps {
 }
 
 export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSimulator }) => {
-  const [activeTab, setActiveTab] = useState<'SETTINGS' | 'START_MSG' | 'MENUS' | 'BUTTONS' | 'FAQS' | 'PAYMENTS' | 'VERSIONS'>('MENUS');
+  const [activeTab, setActiveTab] = useState<'SETTINGS' | 'START_MSG' | 'MENUS' | 'BUTTONS' | 'COMMANDS' | 'FAQS' | 'PAYMENTS' | 'VERSIONS'>('MENUS');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deploying, setDeploying] = useState(false);
@@ -81,6 +84,9 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
   // Buttons State
   const [buttons, setButtons] = useState<BotButton[]>([]);
 
+  // Commands State (Command Builder)
+  const [commands, setCommands] = useState<BotCommand[]>([]);
+
   // FAQs State
   const [faqs, setFaqs] = useState<BotFaq[]>([]);
 
@@ -107,6 +113,7 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
 
   // Mockup Interactive State
   const [previewCurrentMenuId, setPreviewCurrentMenuId] = useState<string>('main');
+  const [isPhoneCmdMenuOpen, setIsPhoneCmdMenuOpen] = useState(false);
   const [qrTestPreview, setQrTestPreview] = useState<{ qrImageUrl?: string; upiUri?: string } | null>(null);
   const [qrTestLoading, setQrTestLoading] = useState(false);
 
@@ -216,6 +223,12 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
 
       if (settingsRes.faqs) setFaqs(settingsRes.faqs);
       if (settingsRes.paymentConfig) setPaymentConfig(settingsRes.paymentConfig);
+      if (settingsRes.commands && settingsRes.commands.length > 0) {
+        setCommands(settingsRes.commands);
+      } else {
+        const cmdRes = await api.getBotCommands(bot.id);
+        if (cmdRes.commands) setCommands(cmdRes.commands);
+      }
       if (prodRes.products) setProducts(prodRes.products);
       if (catRes.categories) setCategories(catRes.categories);
       if (verRes.versions) setVersions(verRes.versions);
@@ -238,12 +251,13 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
     }
 
     try {
-      // Perform atomic full save across settings, menus, buttons, faqs, and payment config
+      // Perform atomic full save across settings, menus, buttons, faqs, commands, and payment config
       await api.fullSaveBot(bot.id, {
         settings,
         menus,
         buttons,
         faqs,
+        commands,
         paymentConfig
       });
 
@@ -545,6 +559,17 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
             >
               <LayoutGrid className="w-3.5 h-3.5" />
               <span>Inline Buttons ({buttons.length})</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('COMMANDS')}
+              className={`py-3 px-3.5 text-xs font-bold flex items-center space-x-1.5 whitespace-nowrap transition-colors ${
+                activeTab === 'COMMANDS'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400 bg-slate-900'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5" />
+              <span>Commands ({commands.length})</span>
             </button>
             <button
               onClick={() => setActiveTab('START_MSG')}
@@ -985,6 +1010,29 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
                 )}
               </div>
             </div>
+          )}
+
+          {/* Tab: Telegram Command Builder */}
+          {activeTab === 'COMMANDS' && (
+            <BotCommandBuilder
+              botId={bot.id}
+              botUsername={bot.username}
+              commands={commands}
+              menus={menus}
+              products={products}
+              categories={categories}
+              onCommandsChange={(newCmds) => setCommands(newCmds)}
+              onPreviewCommand={(cmd) => {
+                if (cmd.action_type === 'OPEN_MENU' || cmd.action_type === 'OPEN_SUBMENU') {
+                  const targetMenuId = cmd.target_id || 'main';
+                  setPreviewCurrentMenuId(targetMenuId);
+                  setSelectedMenuId(targetMenuId);
+                } else {
+                  setPreviewCurrentMenuId('main');
+                  setSelectedMenuId('main');
+                }
+              }}
+            />
           )}
 
           {/* Tab 3: Start / Welcome Message */}
@@ -1512,8 +1560,74 @@ export const BotEditorView: React.FC<BotEditorViewProps> = ({ bot, onOpenLiveSim
               </div>
             </div>
 
+            {/* Telegram Interactive Command Bar with [/] Menu */}
+            <div className="relative mt-2">
+              {/* Command Popover */}
+              {isPhoneCmdMenuOpen && (
+                <div className="absolute bottom-12 left-0 right-0 bg-[#141e30] border border-slate-700 rounded-xl p-2 shadow-2xl z-30 max-h-48 overflow-y-auto space-y-1">
+                  <div className="text-[10px] font-bold text-slate-400 px-2 py-1 uppercase tracking-wider flex justify-between items-center border-b border-slate-700/60 pb-1 mb-1">
+                    <span>Telegram Commands</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsPhoneCmdMenuOpen(false)}
+                      className="text-slate-400 hover:text-white"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {commands.filter(c => c.is_enabled).length === 0 ? (
+                    <div className="p-2 text-center text-[10px] text-slate-500">No active commands</div>
+                  ) : (
+                    commands
+                      .filter(c => c.is_enabled)
+                      .map(c => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => {
+                            if (c.action_type === 'OPEN_MENU' || c.action_type === 'OPEN_SUBMENU') {
+                              const targetMenuId = c.target_id || 'main';
+                              setPreviewCurrentMenuId(targetMenuId);
+                              setSelectedMenuId(targetMenuId);
+                            } else {
+                              setPreviewCurrentMenuId('main');
+                              setSelectedMenuId('main');
+                            }
+                            setIsPhoneCmdMenuOpen(false);
+                          }}
+                          className="w-full px-2 py-1.5 rounded-lg hover:bg-slate-800 text-left text-[11px] flex items-center justify-between transition-colors"
+                        >
+                          <span className="font-mono font-bold text-cyan-400">{c.command}</span>
+                          <span className="text-[10px] text-slate-300 truncate max-w-[130px]">{c.description}</span>
+                        </button>
+                      ))
+                  )}
+                </div>
+              )}
+
+              {/* Bottom Input Pill */}
+              <div className="flex items-center space-x-1.5 bg-[#111827] border border-slate-700 rounded-2xl p-1.5 shadow-inner">
+                <button
+                  type="button"
+                  onClick={() => setIsPhoneCmdMenuOpen(!isPhoneCmdMenuOpen)}
+                  className={`px-2.5 py-1 rounded-xl text-[11px] font-mono font-black transition-all flex items-center space-x-1 ${
+                    isPhoneCmdMenuOpen
+                      ? 'bg-cyan-500 text-slate-950 shadow-sm'
+                      : 'bg-slate-800 hover:bg-slate-700 text-cyan-400'
+                  }`}
+                  title="Toggle Telegram Commands Menu"
+                >
+                  <span>/</span>
+                  <span className="font-sans font-bold text-[10px]">Menu</span>
+                </button>
+                <div className="flex-1 text-[11px] text-slate-500 px-1 truncate">
+                  Message {settings.display_name || bot.first_name}...
+                </div>
+              </div>
+            </div>
+
             <div className="mt-2.5 text-center text-[10px] text-slate-500 font-medium">
-              Interactive Navigation Mockup • Tap buttons to navigate
+              Interactive Navigation Mockup • Tap buttons or / Menu to test
             </div>
           </div>
         </div>
